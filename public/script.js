@@ -19,10 +19,13 @@ let messageIdCounter = 0;
 let isRecording = false;
 let recognition = null;
 
-// Add message to chat
+// Add message to chat with enhanced features
 function addMessage(text, isUser, sentiment = null, confidence = null, messageId = null) {
     const messageDiv = document.createElement('div');
     messageDiv.className = `message ${isUser ? 'user' : 'bot'}`;
+    messageDiv.setAttribute('role', 'article');
+    messageDiv.setAttribute('aria-label', `${isUser ? 'Your' : 'Bot'} message`);
+    
     if (messageId) {
         messageDiv.dataset.messageId = messageId;
     }
@@ -49,12 +52,14 @@ function addMessage(text, isUser, sentiment = null, confidence = null, messageId
         correctBtn.className = 'feedback-btn correct';
         correctBtn.innerHTML = '👍';
         correctBtn.title = 'Correct sentiment';
+        correctBtn.setAttribute('aria-label', 'Mark sentiment as correct');
         correctBtn.onclick = () => sendFeedback(messageId, text, sentiment, true);
         
         const incorrectBtn = document.createElement('button');
         incorrectBtn.className = 'feedback-btn incorrect';
         incorrectBtn.innerHTML = '👎';
         incorrectBtn.title = 'Wrong sentiment';
+        incorrectBtn.setAttribute('aria-label', 'Mark sentiment as incorrect');
         incorrectBtn.onclick = () => sendFeedback(messageId, text, sentiment, false);
         
         feedbackDiv.appendChild(correctBtn);
@@ -63,6 +68,11 @@ function addMessage(text, isUser, sentiment = null, confidence = null, messageId
         infoDiv.appendChild(badge);
         infoDiv.appendChild(feedbackDiv);
         messageDiv.appendChild(infoDiv);
+    }
+    
+    // Add reactions for bot messages
+    if (!isUser) {
+        addReactionButtons(messageDiv, true);
     }
     
     chatContainer.appendChild(messageDiv);
@@ -94,26 +104,23 @@ function removeTypingIndicator() {
     }
 }
 
-// Send message to API
+// FIXED Send Message function
 async function sendMessage() {
     const message = messageInput.value.trim();
     
     if (!message) return;
     
-    // Disable input while processing
+    // Clear any existing error messages
+    const existingErrors = document.querySelectorAll('.error-message');
+    existingErrors.forEach(error => error.remove());
+    
     messageInput.disabled = true;
     sendButton.disabled = true;
     
-    // Generate message ID
     const messageId = ++messageIdCounter;
-    
-    // Add user message to chat (will be updated with sentiment)
     const userMessageDiv = addMessage(message, true, null, null, messageId);
     
-    // Clear input
     messageInput.value = '';
-    
-    // Show typing indicator
     showTypingIndicator();
     
     try {
@@ -126,20 +133,45 @@ async function sendMessage() {
         });
         
         if (!response.ok) {
-            throw new Error('Network response was not ok');
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
         
         const data = await response.json();
         
-        // Remove typing indicator
+        // Variable typing delay (more natural)
+        const typingDelay = 500 + Math.random() * 1000;
+        await new Promise(resolve => setTimeout(resolve, typingDelay));
+        
         removeTypingIndicator();
         
-        // Remove old message and add new one with sentiment
+        // Update user message with sentiment
         userMessageDiv.remove();
-        addMessage(message, true, data.sentiment, data.confidence, messageId);
+        const newUserMsg = addMessage(message, true, data.sentiment, data.confidence, messageId);
+        
+        // Add emotion and intent badges if available
+        if (data.emotion || data.intent) {
+            const infoDiv = newUserMsg.querySelector('.message-info');
+            if (data.emotion) {
+                const emotionBadge = document.createElement('span');
+                emotionBadge.className = 'emotion-badge';
+                emotionBadge.textContent = data.emotion;
+                infoDiv.appendChild(emotionBadge);
+            }
+            if (data.intent) {
+                const intentBadge = document.createElement('span');
+                intentBadge.className = 'intent-badge';
+                intentBadge.textContent = data.intent;
+                infoDiv.appendChild(intentBadge);
+            }
+        }
         
         // Add bot response
         addMessage(data.bot_response, false);
+        
+        // Show suggested replies
+        if (data.intent || data.sentiment) {
+            showSuggestedReplies(data.intent, data.sentiment);
+        }
         
         // Store in history
         conversationHistory.push({
@@ -147,116 +179,50 @@ async function sendMessage() {
             user: message,
             sentiment: data.sentiment,
             confidence: data.confidence,
+            intent: data.intent || null,
+            emotion: data.emotion || null,
             bot: data.bot_response,
             timestamp: new Date().toISOString()
         });
         
-        // Auto-train: Learn from conversation patterns
+        updateHistorySidebar();
         autoTrain(data);
         
     } catch (error) {
         removeTypingIndicator();
-        addMessage('Sorry, I encountered an error. Please try again.', false);
-        console.error('Error:', error);
+        
+        // Show error as separate error message, not bot message
+        const errorDiv = document.createElement('div');
+        errorDiv.className = 'error-message';
+        errorDiv.innerHTML = `
+            <div class="error-content">
+                ⚠️ Connection failed. Please check your internet connection.
+                <button class="retry-btn" onclick="retryMessage('${message.replace(/'/g, "\\'")}')">🔄 Retry</button>
+            </div>
+        `;
+        chatContainer.appendChild(errorDiv);
+        chatContainer.scrollTop = chatContainer.scrollHeight;
+        
+        console.error('Chat Error:', error);
     }
     
-    // Re-enable input
     messageInput.disabled = false;
     sendButton.disabled = false;
     messageInput.focus();
 }
 
-// Auto-training function (sends data to backend for model improvement)
-async function autoTrain(data) {
-    try {
-        // Send interaction to backend for training
-        const response = await fetch('/api/train', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                message: data.user_message,
-                sentiment: data.sentiment,
-                confidence: data.confidence
-            })
-        });
-        
-        if (response.ok) {
-            const result = await response.json();
-            console.log('✅ Model trained:', {
-                totalInteractions: result.total_interactions,
-                learnedWords: result.learned_words
-            });
-            
-            // Update UI to show training status
-            updateTrainingStatus(result);
-        }
-    } catch (error) {
-        console.error('Training error:', error);
-    }
+// Retry failed message
+window.retryMessage = function(message) {
+    // Remove error messages
+    const errorMessages = document.querySelectorAll('.error-message');
+    errorMessages.forEach(error => error.remove());
     
-    // Also store locally as backup
-    const patterns = JSON.parse(localStorage.getItem('chatPatterns') || '[]');
-    patterns.push({
-        message: data.user_message,
-        sentiment: data.sentiment,
-        confidence: data.confidence,
-        timestamp: new Date().toISOString()
-    });
-    
-    if (patterns.length > 100) {
-        patterns.shift();
-    }
-    
-    localStorage.setItem('chatPatterns', JSON.stringify(patterns));
-}
+    messageInput.value = message;
+    sendMessage();
+};
 
-// Update training status in UI
-function updateTrainingStatus(result) {
-    const statusDiv = document.getElementById('trainingStatus');
-    if (statusDiv) {
-        statusDiv.textContent = `🧠 Learned: ${result.learned_words.positive + result.learned_words.negative + result.learned_words.neutral} words`;
-    }
-}
-
-// Event listeners
-sendButton.addEventListener('click', sendMessage);
-
-messageInput.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') {
-        sendMessage();
-    }
-});
-
-// Focus input on load
-messageInput.focus();
-
-
-// Load model stats on page load
-async function loadModelStats() {
-    try {
-        const response = await fetch('/api/model-stats');
-        if (response.ok) {
-            const stats = await response.json();
-            console.log('📊 Model Statistics:', stats);
-            
-            if (stats.total_interactions > 0) {
-                const statusDiv = document.getElementById('trainingStatus');
-                const totalWords = stats.learned_vocabulary.positive_words + 
-                                 stats.learned_vocabulary.negative_words + 
-                                 stats.learned_vocabulary.neutral_words;
-                statusDiv.textContent = `🧠 Learned: ${totalWords} words from ${stats.total_interactions} conversations`;
-            }
-        }
-    } catch (error) {
-        console.error('Error loading stats:', error);
-    }
-}
-
-// Load stats when page loads
-loadModelStats();
-
+// Rest of the functions remain the same...
+// (I'll add the other functions in the next part)
 
 // Send feedback to improve model
 async function sendFeedback(messageId, message, predictedSentiment, isCorrect) {
@@ -264,7 +230,6 @@ async function sendFeedback(messageId, message, predictedSentiment, isCorrect) {
         let correctSentiment = predictedSentiment;
         
         if (!isCorrect) {
-            // Ask user for correct sentiment
             const options = ['POSITIVE', 'NEGATIVE', 'NEUTRAL'].filter(s => s !== predictedSentiment);
             correctSentiment = prompt(`What should the sentiment be?\n1. ${options[0]}\n2. ${options[1]}\n\nEnter 1 or 2:`) === '1' ? options[0] : options[1];
         }
@@ -285,7 +250,6 @@ async function sendFeedback(messageId, message, predictedSentiment, isCorrect) {
         if (response.ok) {
             const result = await response.json();
             
-            // Update UI
             const messageDiv = document.querySelector(`[data-message-id="${messageId}"]`);
             if (messageDiv) {
                 const feedbackBtns = messageDiv.querySelector('.feedback-buttons');
@@ -297,8 +261,6 @@ async function sendFeedback(messageId, message, predictedSentiment, isCorrect) {
             }
             
             console.log('✅ Feedback recorded:', result);
-            
-            // Reload stats
             loadModelStats();
         }
     } catch (error) {
@@ -306,116 +268,107 @@ async function sendFeedback(messageId, message, predictedSentiment, isCorrect) {
     }
 }
 
-// Show analytics modal
-analyticsBtn.addEventListener('click', async () => {
-    analyticsModal.style.display = 'flex';
-    await loadAnalytics();
-});
-
-closeModal.addEventListener('click', () => {
-    analyticsModal.style.display = 'none';
-});
-
-// Close modal when clicking outside
-analyticsModal.addEventListener('click', (e) => {
-    if (e.target === analyticsModal) {
-        analyticsModal.style.display = 'none';
-    }
-});
-
-// Load analytics data
-async function loadAnalytics() {
-    const content = document.getElementById('analyticsContent');
-    content.innerHTML = '<div class="loading">Loading analytics...</div>';
-    
+// Auto-training function
+async function autoTrain(data) {
     try {
-        const response = await fetch('/api/model-stats');
-        if (!response.ok) throw new Error('Failed to load analytics');
+        const response = await fetch('/api/train', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                message: data.user_message,
+                sentiment: data.sentiment,
+                confidence: data.confidence
+            })
+        });
         
-        const stats = await response.json();
-        
-        const total = stats.total_interactions;
-        const dist = stats.sentiment_distribution;
-        const vocab = stats.learned_vocabulary;
-        
-        content.innerHTML = `
-            <div class="stats-grid">
-                <div class="stat-card">
-                    <div class="stat-value">${total}</div>
-                    <div class="stat-label">Total Conversations</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-value">${vocab.positive_words + vocab.negative_words + vocab.neutral_words}</div>
-                    <div class="stat-label">Words Learned</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-value">${stats.feedback_count || 0}</div>
-                    <div class="stat-label">User Corrections</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-value">${stats.accuracy ? (stats.accuracy * 100).toFixed(1) + '%' : 'N/A'}</div>
-                    <div class="stat-label">Accuracy</div>
-                </div>
-            </div>
+        if (response.ok) {
+            const result = await response.json();
+            console.log('✅ Model trained:', {
+                totalInteractions: result.total_interactions,
+                learnedWords: result.learned_words
+            });
             
-            <div class="chart-section">
-                <h3>Sentiment Distribution</h3>
-                <div class="bar-chart">
-                    <div class="bar-item">
-                        <div class="bar-label">Positive</div>
-                        <div class="bar-container">
-                            <div class="bar bar-positive" style="width: ${total ? (dist.positive / total * 100) : 0}%"></div>
-                            <span class="bar-value">${dist.positive}</span>
-                        </div>
-                    </div>
-                    <div class="bar-item">
-                        <div class="bar-label">Negative</div>
-                        <div class="bar-container">
-                            <div class="bar bar-negative" style="width: ${total ? (dist.negative / total * 100) : 0}%"></div>
-                            <span class="bar-value">${dist.negative}</span>
-                        </div>
-                    </div>
-                    <div class="bar-item">
-                        <div class="bar-label">Neutral</div>
-                        <div class="bar-container">
-                            <div class="bar bar-neutral" style="width: ${total ? (dist.neutral / total * 100) : 0}%"></div>
-                            <span class="bar-value">${dist.neutral}</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="words-section">
-                <div class="words-column">
-                    <h3>Top Positive Words</h3>
-                    <div class="word-list">
-                        ${stats.top_positive_words.slice(0, 10).map(([word, weight]) => 
-                            `<div class="word-item">
-                                <span class="word">${word}</span>
-                                <span class="weight">${weight.toFixed(2)}</span>
-                            </div>`
-                        ).join('')}
-                    </div>
-                </div>
-                <div class="words-column">
-                    <h3>Top Negative Words</h3>
-                    <div class="word-list">
-                        ${stats.top_negative_words.slice(0, 10).map(([word, weight]) => 
-                            `<div class="word-item">
-                                <span class="word">${word}</span>
-                                <span class="weight">${weight.toFixed(2)}</span>
-                            </div>`
-                        ).join('')}
-                    </div>
-                </div>
-            </div>
-        `;
+            updateTrainingStatus(result);
+        }
     } catch (error) {
-        content.innerHTML = '<div class="error">Failed to load analytics. Please try again.</div>';
-        console.error('Analytics error:', error);
+        console.error('Training error:', error);
     }
 }
 
+// Update training status in UI
+function updateTrainingStatus(result) {
+    const statusDiv = document.getElementById('trainingStatus');
+    if (statusDiv) {
+        const totalWords = result.learned_words.positive + result.learned_words.negative + result.learned_words.neutral;
+        statusDiv.textContent = `🧠 Learned: ${totalWords} words from ${result.total_interactions} conversations`;
+    }
+}
+
+// Message Reactions
+function addReactionButtons(messageDiv, isBot) {
+    if (!isBot) return;
+    
+    const reactionsDiv = document.createElement('div');
+    reactionsDiv.className = 'message-reactions';
+    
+    const reactions = ['👍', '❤️', '😊', '🎉', '🤔'];
+    reactions.forEach(emoji => {
+        const btn = document.createElement('button');
+        btn.className = 'reaction-btn';
+        btn.textContent = emoji;
+        btn.onclick = () => {
+            btn.classList.toggle('active');
+            console.log('Reaction:', emoji);
+        };
+        reactionsDiv.appendChild(btn);
+    });
+    
+    messageDiv.appendChild(reactionsDiv);
+}
+
+// Suggested Replies
+function showSuggestedReplies(intent, sentiment) {
+    const existingSuggestions = document.querySelector('.suggested-replies');
+    if (existingSuggestions) {
+        existingSuggestions.remove();
+    }
+    
+    let suggestions = [];
+    
+    if (intent === 'question') {
+        suggestions = ['Tell me more', 'Can you explain?', 'What else?'];
+    } else if (intent === 'complaint') {
+        suggestions = ['I need help', 'Can you fix this?', 'What should I do?'];
+    } else if (sentiment === 'POSITIVE') {
+        suggestions = ['Thank you!', 'That\'s great!', 'Perfect!'];
+    } else if (sentiment === 'NEGATIVE') {
+        suggestions = ['I need assistance', 'This is frustrating', 'Help please'];
+    } else {
+        suggestions = ['Tell me more', 'What do you suggest?', 'Okay'];
+    }
+    
+    const suggestionsDiv = document.createElement('div');
+    suggestionsDiv.className = 'suggested-replies';
+    suggestionsDiv.setAttribute('role', 'region');
+    suggestionsDiv.setAttribute('aria-label', 'Suggested replies');
+    
+    suggestions.forEach(text => {
+        const btn = document.createElement('button');
+        btn.className = 'suggested-reply';
+        btn.textContent = text;
+        btn.onclick = () => {
+            messageInput.value = text;
+            messageInput.focus();
+            suggestionsDiv.remove();
+        };
+        suggestionsDiv.appendChild(btn);
+    });
+    
+    const inputContainer = document.querySelector('.input-container');
+    inputContainer.parentNode.insertBefore(suggestionsDiv, inputContainer);
+}
 
 // Dark Mode Toggle
 darkModeBtn.addEventListener('click', () => {
@@ -557,112 +510,178 @@ if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
     voiceBtn.style.display = 'none';
 }
 
-// Enhanced Send Message with typing delay
-async function sendMessage() {
-    const message = messageInput.value.trim();
-    
-    if (!message) return;
-    
-    messageInput.disabled = true;
-    sendButton.disabled = true;
-    
-    const messageId = ++messageIdCounter;
-    const userMessageDiv = addMessage(message, true, null, null, messageId);
-    
-    messageInput.value = '';
-    
-    showTypingIndicator();
+// Analytics Modal
+analyticsBtn.addEventListener('click', async () => {
+    analyticsModal.style.display = 'flex';
+    await loadAnalytics();
+});
+
+closeModal.addEventListener('click', () => {
+    analyticsModal.style.display = 'none';
+});
+
+analyticsModal.addEventListener('click', (e) => {
+    if (e.target === analyticsModal) {
+        analyticsModal.style.display = 'none';
+    }
+});
+
+// Load analytics data
+async function loadAnalytics() {
+    const content = document.getElementById('analyticsContent');
+    content.innerHTML = '<div class="loading">Loading analytics...</div>';
     
     try {
-        const response = await fetch('/api/chat', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ message: message })
-        });
+        const response = await fetch('/api/model-stats');
+        if (!response.ok) throw new Error('Failed to load analytics');
         
-        if (!response.ok) {
-            throw new Error('Network response was not ok');
-        }
+        const stats = await response.json();
         
-        const data = await response.json();
+        const total = stats.total_interactions;
+        const dist = stats.sentiment_distribution;
+        const vocab = stats.learned_vocabulary;
         
-        // Variable typing delay (more natural)
-        const typingDelay = 500 + Math.random() * 1000;
-        await new Promise(resolve => setTimeout(resolve, typingDelay));
-        
-        removeTypingIndicator();
-        
-        userMessageDiv.remove();
-        addMessage(message, true, data.sentiment, data.confidence, messageId);
-        
-        addMessage(data.bot_response, false);
-        
-        conversationHistory.push({
-            id: messageId,
-            user: message,
-            sentiment: data.sentiment,
-            confidence: data.confidence,
-            bot: data.bot_response,
-            timestamp: new Date().toISOString()
-        });
-        
-        updateHistorySidebar();
-        autoTrain(data);
-        
-    } catch (error) {
-        removeTypingIndicator();
-        
-        // Error recovery - retry option
-        const retryDiv = document.createElement('div');
-        retryDiv.className = 'message bot';
-        retryDiv.innerHTML = `
-            <div class="message-content">Sorry, I encountered an error. 
-            <button onclick="retryLastMessage('${message.replace(/'/g, "\\'")}')">🔄 Retry</button>
+        content.innerHTML = `
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-value">${total}</div>
+                    <div class="stat-label">Total Conversations</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value">${vocab.positive_words + vocab.negative_words + vocab.neutral_words}</div>
+                    <div class="stat-label">Words Learned</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value">${stats.feedback_count || 0}</div>
+                    <div class="stat-label">User Corrections</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value">${stats.accuracy ? (stats.accuracy * 100).toFixed(1) + '%' : 'N/A'}</div>
+                    <div class="stat-label">Accuracy</div>
+                </div>
+            </div>
+            
+            <div class="chart-section">
+                <h3>Sentiment Distribution</h3>
+                <div class="bar-chart">
+                    <div class="bar-item">
+                        <div class="bar-label">Positive</div>
+                        <div class="bar-container">
+                            <div class="bar bar-positive" style="width: ${total ? (dist.positive / total * 100) : 0}%"></div>
+                            <span class="bar-value">${dist.positive}</span>
+                        </div>
+                    </div>
+                    <div class="bar-item">
+                        <div class="bar-label">Negative</div>
+                        <div class="bar-container">
+                            <div class="bar bar-negative" style="width: ${total ? (dist.negative / total * 100) : 0}%"></div>
+                            <span class="bar-value">${dist.negative}</span>
+                        </div>
+                    </div>
+                    <div class="bar-item">
+                        <div class="bar-label">Neutral</div>
+                        <div class="bar-container">
+                            <div class="bar bar-neutral" style="width: ${total ? (dist.neutral / total * 100) : 0}%"></div>
+                            <span class="bar-value">${dist.neutral}</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="words-section">
+                <div class="words-column">
+                    <h3>Top Positive Words</h3>
+                    <div class="word-list">
+                        ${stats.top_positive_words.slice(0, 10).map(([word, weight]) => 
+                            `<div class="word-item">
+                                <span class="word">${word}</span>
+                                <span class="weight">${weight.toFixed(2)}</span>
+                            </div>`
+                        ).join('')}
+                    </div>
+                </div>
+                <div class="words-column">
+                    <h3>Top Negative Words</h3>
+                    <div class="word-list">
+                        ${stats.top_negative_words.slice(0, 10).map(([word, weight]) => 
+                            `<div class="word-item">
+                                <span class="word">${word}</span>
+                                <span class="weight">${weight.toFixed(2)}</span>
+                            </div>`
+                        ).join('')}
+                    </div>
+                </div>
             </div>
         `;
-        chatContainer.appendChild(retryDiv);
-        console.error('Error:', error);
+    } catch (error) {
+        content.innerHTML = '<div class="error">Failed to load analytics. Please try again.</div>';
+        console.error('Analytics error:', error);
     }
-    
-    messageInput.disabled = false;
-    sendButton.disabled = false;
-    messageInput.focus();
 }
 
-// Retry failed message
-window.retryLastMessage = function(message) {
-    messageInput.value = message;
-    sendMessage();
-};
+// Load model stats on page load
+async function loadModelStats() {
+    try {
+        const response = await fetch('/api/model-stats');
+        if (response.ok) {
+            const stats = await response.json();
+            console.log('📊 Model Statistics:', stats);
+            
+            if (stats.total_interactions > 0) {
+                const statusDiv = document.getElementById('trainingStatus');
+                const totalWords = stats.learned_vocabulary.positive_words + 
+                                 stats.learned_vocabulary.negative_words + 
+                                 stats.learned_vocabulary.neutral_words;
+                statusDiv.textContent = `🧠 Learned: ${totalWords} words from ${stats.total_interactions} conversations`;
+            }
+        }
+    } catch (error) {
+        console.error('Error loading stats:', error);
+    }
+}
+
+// Event listeners
+sendButton.addEventListener('click', sendMessage);
+
+messageInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') {
+        sendMessage();
+    }
+});
 
 // Keyboard shortcuts
 document.addEventListener('keydown', (e) => {
-    // Ctrl/Cmd + K: Focus input
     if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
         e.preventDefault();
         messageInput.focus();
     }
     
-    // Ctrl/Cmd + D: Toggle dark mode
     if ((e.ctrlKey || e.metaKey) && e.key === 'd') {
         e.preventDefault();
         darkModeBtn.click();
     }
     
-    // Ctrl/Cmd + H: Toggle sidebar
     if ((e.ctrlKey || e.metaKey) && e.key === 'h') {
         e.preventDefault();
         toggleSidebar.click();
     }
     
-    // Ctrl/Cmd + E: Export
     if ((e.ctrlKey || e.metaKey) && e.key === 'e') {
         e.preventDefault();
         exportBtn.click();
     }
+    
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'C') {
+        e.preventDefault();
+        document.body.classList.toggle('high-contrast');
+        localStorage.setItem('highContrast', document.body.classList.contains('high-contrast'));
+    }
 });
+
+// Load preferences
+if (localStorage.getItem('highContrast') === 'true') {
+    document.body.classList.add('high-contrast');
+}
 
 // ARIA labels for accessibility
 messageInput.setAttribute('aria-label', 'Type your message');
@@ -671,249 +690,8 @@ darkModeBtn.setAttribute('aria-label', 'Toggle dark mode');
 voiceBtn.setAttribute('aria-label', 'Voice input');
 analyticsBtn.setAttribute('aria-label', 'View analytics');
 
+// Focus input on load
+messageInput.focus();
 
-// Message Reactions
-function addReactionButtons(messageDiv, isBot) {
-    if (!isBot) return;
-    
-    const reactionsDiv = document.createElement('div');
-    reactionsDiv.className = 'message-reactions';
-    
-    const reactions = ['👍', '❤️', '😊', '🎉', '🤔'];
-    reactions.forEach(emoji => {
-        const btn = document.createElement('button');
-        btn.className = 'reaction-btn';
-        btn.textContent = emoji;
-        btn.onclick = () => {
-            btn.classList.toggle('active');
-            console.log('Reaction:', emoji);
-        };
-        reactionsDiv.appendChild(btn);
-    });
-    
-    messageDiv.appendChild(reactionsDiv);
-}
-
-// Suggested Replies
-function showSuggestedReplies(intent, sentiment) {
-    const existingSuggestions = document.querySelector('.suggested-replies');
-    if (existingSuggestions) {
-        existingSuggestions.remove();
-    }
-    
-    let suggestions = [];
-    
-    if (intent === 'question') {
-        suggestions = ['Tell me more', 'Can you explain?', 'What else?'];
-    } else if (intent === 'complaint') {
-        suggestions = ['I need help', 'Can you fix this?', 'What should I do?'];
-    } else if (sentiment === 'POSITIVE') {
-        suggestions = ['Thank you!', 'That\'s great!', 'Perfect!'];
-    } else if (sentiment === 'NEGATIVE') {
-        suggestions = ['I need assistance', 'This is frustrating', 'Help please'];
-    } else {
-        suggestions = ['Tell me more', 'What do you suggest?', 'Okay'];
-    }
-    
-    const suggestionsDiv = document.createElement('div');
-    suggestionsDiv.className = 'suggested-replies';
-    suggestionsDiv.setAttribute('role', 'region');
-    suggestionsDiv.setAttribute('aria-label', 'Suggested replies');
-    
-    suggestions.forEach(text => {
-        const btn = document.createElement('button');
-        btn.className = 'suggested-reply';
-        btn.textContent = text;
-        btn.onclick = () => {
-            messageInput.value = text;
-            messageInput.focus();
-            suggestionsDiv.remove();
-        };
-        suggestionsDiv.appendChild(btn);
-    });
-    
-    const inputContainer = document.querySelector('.input-container');
-    inputContainer.parentNode.insertBefore(suggestionsDiv, inputContainer);
-}
-
-// Enhanced Add Message with reactions and badges
-function addMessage(text, isUser, sentiment = null, confidence = null, messageId = null) {
-    const messageDiv = document.createElement('div');
-    messageDiv.className = `message ${isUser ? 'user' : 'bot'}`;
-    messageDiv.setAttribute('role', 'article');
-    messageDiv.setAttribute('aria-label', `${isUser ? 'Your' : 'Bot'} message`);
-    
-    if (messageId) {
-        messageDiv.dataset.messageId = messageId;
-    }
-    
-    const contentDiv = document.createElement('div');
-    contentDiv.className = 'message-content';
-    contentDiv.textContent = text;
-    
-    messageDiv.appendChild(contentDiv);
-    
-    // Add sentiment badge and feedback buttons for user messages
-    if (isUser && sentiment) {
-        const infoDiv = document.createElement('div');
-        infoDiv.className = 'message-info';
-        
-        const badge = document.createElement('div');
-        badge.className = `sentiment-badge sentiment-${sentiment.toLowerCase()}`;
-        badge.textContent = `${sentiment} (${(confidence * 100).toFixed(0)}%)`;
-        
-        const feedbackDiv = document.createElement('div');
-        feedbackDiv.className = 'feedback-buttons';
-        
-        const correctBtn = document.createElement('button');
-        correctBtn.className = 'feedback-btn correct';
-        correctBtn.innerHTML = '👍';
-        correctBtn.title = 'Correct sentiment';
-        correctBtn.setAttribute('aria-label', 'Mark sentiment as correct');
-        correctBtn.onclick = () => sendFeedback(messageId, text, sentiment, true);
-        
-        const incorrectBtn = document.createElement('button');
-        incorrectBtn.className = 'feedback-btn incorrect';
-        incorrectBtn.innerHTML = '👎';
-        incorrectBtn.title = 'Wrong sentiment';
-        incorrectBtn.setAttribute('aria-label', 'Mark sentiment as incorrect');
-        incorrectBtn.onclick = () => sendFeedback(messageId, text, sentiment, false);
-        
-        feedbackDiv.appendChild(correctBtn);
-        feedbackDiv.appendChild(incorrectBtn);
-        
-        infoDiv.appendChild(badge);
-        infoDiv.appendChild(feedbackDiv);
-        messageDiv.appendChild(infoDiv);
-    }
-    
-    // Add reactions for bot messages
-    if (!isUser) {
-        addReactionButtons(messageDiv, true);
-    }
-    
-    chatContainer.appendChild(messageDiv);
-    chatContainer.scrollTop = chatContainer.scrollHeight;
-    
-    // Announce to screen readers
-    const announcement = document.createElement('div');
-    announcement.className = 'sr-only';
-    announcement.setAttribute('role', 'status');
-    announcement.setAttribute('aria-live', 'polite');
-    announcement.textContent = `${isUser ? 'You said' : 'Bot replied'}: ${text}`;
-    document.body.appendChild(announcement);
-    setTimeout(() => announcement.remove(), 1000);
-    
-    return messageDiv;
-}
-
-// Enhanced Send Message with emotion and intent
-async function sendMessage() {
-    const message = messageInput.value.trim();
-    
-    if (!message) return;
-    
-    messageInput.disabled = true;
-    sendButton.disabled = true;
-    
-    const messageId = ++messageIdCounter;
-    const userMessageDiv = addMessage(message, true, null, null, messageId);
-    
-    messageInput.value = '';
-    
-    showTypingIndicator();
-    
-    try {
-        const response = await fetch('/api/chat', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ message: message })
-        });
-        
-        if (!response.ok) {
-            throw new Error('Network response was not ok');
-        }
-        
-        const data = await response.json();
-        
-        // Variable typing delay (more natural)
-        const typingDelay = 500 + Math.random() * 1000;
-        await new Promise(resolve => setTimeout(resolve, typingDelay));
-        
-        removeTypingIndicator();
-        
-        userMessageDiv.remove();
-        const newUserMsg = addMessage(message, true, data.sentiment, data.confidence, messageId);
-        
-        // Add emotion and intent badges
-        if (data.emotion) {
-            const emotionBadge = document.createElement('span');
-            emotionBadge.className = 'emotion-badge';
-            emotionBadge.textContent = data.emotion;
-            newUserMsg.querySelector('.message-info').appendChild(emotionBadge);
-        }
-        
-        if (data.intent) {
-            const intentBadge = document.createElement('span');
-            intentBadge.className = 'intent-badge';
-            intentBadge.textContent = data.intent;
-            newUserMsg.querySelector('.message-info').appendChild(intentBadge);
-        }
-        
-        addMessage(data.bot_response, false);
-        
-        // Show suggested replies
-        showSuggestedReplies(data.intent, data.sentiment);
-        
-        conversationHistory.push({
-            id: messageId,
-            user: message,
-            sentiment: data.sentiment,
-            confidence: data.confidence,
-            intent: data.intent,
-            emotion: data.emotion,
-            bot: data.bot_response,
-            timestamp: new Date().toISOString()
-        });
-        
-        updateHistorySidebar();
-        autoTrain(data);
-        
-    } catch (error) {
-        removeTypingIndicator();
-        
-        // Error recovery - retry option
-        const retryDiv = document.createElement('div');
-        retryDiv.className = 'message bot';
-        retryDiv.innerHTML = `
-            <div class="message-content">Sorry, I encountered an error. 
-            <button onclick="retryLastMessage('${message.replace(/'/g, "\\'")}')">🔄 Retry</button>
-            </div>
-        `;
-        chatContainer.appendChild(retryDiv);
-        console.error('Error:', error);
-    }
-    
-    messageInput.disabled = false;
-    sendButton.disabled = false;
-    messageInput.focus();
-}
-
-// High Contrast Mode Toggle
-document.addEventListener('keydown', (e) => {
-    // Existing shortcuts...
-    
-    // Ctrl/Cmd + Shift + C: Toggle high contrast
-    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'C') {
-        e.preventDefault();
-        document.body.classList.toggle('high-contrast');
-        localStorage.setItem('highContrast', document.body.classList.contains('high-contrast'));
-    }
-});
-
-// Load high contrast preference
-if (localStorage.getItem('highContrast') === 'true') {
-    document.body.classList.add('high-contrast');
-}
+// Load stats when page loads
+loadModelStats();
